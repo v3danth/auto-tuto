@@ -362,3 +362,83 @@ Order matters — the hooks fight back while the host is live.
 - [ ] Server-initiated-outbound + 12-byte-handshake hunt (§5) in the SIEM
 - [ ] `AutoColor_Linux_Backdoor_v2` YARA (§6) in the file-scan pipeline
 - [ ] IR runbook (§8) references "remove persistence before kill"
+
+---
+
+## 10. Validating these detections
+
+The detection *logic* ships with functional unit tests so you can prove it works
+before relying on it — and keep it working as you tune it. The tests exercise the
+detection tooling only; they do **not** run or simulate the implant.
+
+### 10.1 What is tested
+
+| Component | File | Tests |
+|-----------|------|-------|
+| Config/IOC extractor (§7, SPECS.md §11.3) | `detect/extractor.py` | `tests/test_extractor.py` |
+| Hidden-socket differ (§4.4) | `detect/net_diff.py` | `tests/test_net_diff.py` |
+| Hardened YARA rule (§6) | `detect/auto_color.yar` | `tests/test_yara.py` |
+
+The fixtures are **inert**: the extractor tests generate ciphertext with a
+test-only inverse of the documented transform; the YARA tests match the rule
+against crafted byte blobs (ELF magic + constants + strings), not compiled
+binaries. Nothing here produces or exercises a working backdoor.
+
+### 10.2 Running the tests
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r tests/requirements-dev.txt
+pytest -q tests/
+```
+
+`yara-python` is optional — if it isn't installed, `tests/test_yara.py` is
+skipped rather than failing, so the core suite runs anywhere Python does.
+
+Expected: the extractor and net-diff tests pass with a stock Python; the YARA
+tests additionally pass when `yara-python` (and a libyara build with the `elf`
+module) is present.
+
+### 10.3 Functional tests for the behavioral detections (lab VM)
+
+The Tier 1–4 detections (auditd, process ancestry, preload-in-maps, hook bypass)
+are validated against the *operating system*, not pure functions, so they belong
+in a throwaway VM or container, never on a production host. A safe, implant-free
+procedure:
+
+1. **auditd rule fires (§1).** Load the rules, then write to the watched path
+   with a benign editor and confirm the event:
+   ```bash
+   augenrules --load
+   echo "# benign test write" >> /etc/ld.so.preload   # test VM only
+   ausearch -k ldpreload_tamper -i | tail
+   # cleanup: restore/remove the test line
+   ```
+   Asserts the kernel sees the write. (Remove the line afterward; do not leave a
+   real preload entry in place.)
+
+2. **Daemon-ancestry hunt flags an unexpected child (§2).** Rename a harmless
+   sleeper to look like a daemon and have it fork a child, then run the hunt:
+   ```bash
+   cp /bin/sleep /tmp/crond && /tmp/crond 300 &   # stand-in "daemon"
+   # run the §2.1 triage loop (add "crond" matching on cmdline) and confirm the
+   # unexpected child is listed; kill the stand-in when done.
+   ```
+   This proves the *hunt* detects the pattern without any malicious code.
+
+3. **Hook-bypass discrepancy (§4.4).** With no implant present, `ss` and
+   `conntrack` should agree, i.e. `net_diff.hidden_sockets()` returns `[]`. Pipe
+   real output through the module as a smoke test:
+   ```bash
+   python3 - <<'PY'
+   import subprocess, sys; sys.path.insert(0, "detect"); import net_diff
+   ss = subprocess.run(["ss","-tanp"], capture_output=True, text=True).stdout
+   ct = subprocess.run(["conntrack","-L","-p","tcp"], capture_output=True, text=True).stdout
+   print("hidden:", net_diff.hidden_sockets(ss, ct))   # [] on a clean host
+   PY
+   ```
+
+> These three are **detection self-tests**, not malware tests: each confirms a
+> detection reacts to a benign stand-in for the real behavior. Building a live
+> implant to test against is out of scope by design.
+
