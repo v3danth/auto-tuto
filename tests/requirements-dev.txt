@@ -1,0 +1,6 @@
+# Dev/test dependencies for the detection tooling.
+pytest>=7.0
+# Optional: enables tests/test_yara.py (skipped if absent).
+yara-python>=4.3
+# Optional: for extractor use against real ELF samples (not needed for unit tests).
+pyelftools>=0.29
